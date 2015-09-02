@@ -1,4 +1,6 @@
-from __future__ import unicode_literals
+# encoding: utf-8
+
+from __future__ import absolute_import, division, print_function, unicode_literals
 
 import datetime
 import re
@@ -6,17 +8,17 @@ import warnings
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
-from django.db.models.loading import get_model
 from django.utils import six
 
 import haystack
 from haystack.backends import BaseEngine, BaseSearchBackend, BaseSearchQuery, log_query
 from haystack.constants import DEFAULT_OPERATOR, DJANGO_CT, DJANGO_ID, ID
-from haystack.exceptions import MissingDependency, MoreLikeThisError
+from haystack.exceptions import MissingDependency, MoreLikeThisError, SkipDocument
 from haystack.inputs import Clean, Exact, PythonData, Raw
 from haystack.models import SearchResult
 from haystack.utils import log as logging
 from haystack.utils import get_identifier, get_model_ct
+from haystack.utils.app_loading import haystack_get_model
 
 try:
     import elasticsearch
@@ -54,13 +56,13 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
                 "analyzer": {
                     "ngram_analyzer": {
                         "type": "custom",
-                        "tokenizer": "lowercase",
-                        "filter": ["haystack_ngram"]
+                        "tokenizer": "standard",
+                        "filter": ["haystack_ngram", "lowercase"]
                     },
                     "edgengram_analyzer": {
                         "type": "custom",
-                        "tokenizer": "lowercase",
-                        "filter": ["haystack_edgengram"]
+                        "tokenizer": "standard",
+                        "filter": ["haystack_edgengram", "lowercase"]
                     }
                 },
                 "tokenizer": {
@@ -170,6 +172,8 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
                 final_data['_id'] = final_data[ID]
 
                 prepped_docs.append(final_data)
+            except SkipDocument:
+                self.log.debug(u"Indexing for object `%s` skipped", obj)
             except elasticsearch.TransportError as e:
                 if not self.silently_fail:
                     raise
@@ -360,7 +364,7 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
                 interval = value.get('gap_by').lower()
 
                 # Need to detect on amount (can't be applied on months or years).
-                if value.get('gap_amount', 1) != 1 and not interval in ('month', 'year'):
+                if value.get('gap_amount', 1) != 1 and interval not in ('month', 'year'):
                     # Just the first character is valid for use.
                     interval = "%s%s" % (value['gap_amount'], interval[:1])
 
@@ -440,9 +444,20 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
 
         if dwithin is not None:
             lng, lat = dwithin['point'].get_coords()
+
+            # NB: the 1.0.0 release of elasticsearch introduce an
+            #     incompatible change on the distance filter formating
+            if elasticsearch.VERSION >= (1, 0, 0):
+                distance = "%(dist).6f%(unit)s" % {
+                        'dist': dwithin['distance'].km,
+                        'unit': "km"
+                    }
+            else:
+                distance = dwithin['distance'].km
+
             dwithin_filter = {
                 "geo_distance": {
-                    "distance": dwithin['distance'].km,
+                    "distance": distance,
                     dwithin['field']: {
                         "lat": lat,
                         "lon": lng
@@ -490,7 +505,8 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
         try:
             raw_results = self.conn.search(body=search_kwargs,
                                            index=self.index_name,
-                                           doc_type='modelresult')
+                                           doc_type='modelresult',
+                                           _source=True)
         except elasticsearch.TransportError as e:
             if not self.silently_fail:
                 raise
@@ -499,9 +515,10 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
             raw_results = {}
 
         return self._process_results(raw_results,
-            highlight=kwargs.get('highlight'),
-            result_class=kwargs.get('result_class', SearchResult),
-            distance_point=kwargs.get('distance_point'), geo_sort=geo_sort)
+                                     highlight=kwargs.get('highlight'),
+                                     result_class=kwargs.get('result_class', SearchResult),
+                                     distance_point=kwargs.get('distance_point'),
+                                     geo_sort=geo_sort)
 
     def more_like_this(self, model_instance, additional_query_string=None,
                        start_offset=0, end_offset=None, models=None,
@@ -584,7 +601,7 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
             source = raw_result['_source']
             app_label, model_name = source[DJANGO_CT].split('.')
             additional_fields = {}
-            model = get_model(app_label, model_name)
+            model = haystack_get_model(app_label, model_name)
 
             if model and model in indexed_models:
                 for key, value in source.items():
@@ -731,25 +748,6 @@ FIELD_MAPPINGS = {
 class ElasticsearchSearchQuery(BaseSearchQuery):
     def matching_all_fragment(self):
         return '*:*'
-
-    def add_spatial(self, lat, lon, sfield, distance, filter='bbox'):
-        """Adds spatial query parameters to search query"""
-        kwargs = {
-            'lat': lat,
-            'long': long,
-            'sfield': sfield,
-            'distance': distance,
-        }
-        self.spatial_query.update(kwargs)
-
-    def add_order_by_distance(self, lat, long, sfield):
-        """Orders the search result by distance from point."""
-        kwargs = {
-            'lat': lat,
-            'long': long,
-            'sfield': sfield,
-        }
-        self.order_by_distance.update(kwargs)
 
     def build_query_fragment(self, field, filter_type, value):
         from haystack import connections

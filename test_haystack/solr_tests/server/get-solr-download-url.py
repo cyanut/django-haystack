@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # encoding: utf-8
 
-from __future__ import absolute_import, print_function, unicode_literals
+from __future__ import absolute_import, division, print_function, unicode_literals
 
 import sys
 
@@ -9,7 +9,7 @@ import requests
 
 # Try to import urljoin from the Python 3 reorganized stdlib first:
 try:
-    from urlparse.parse import urljoin
+    from urllib.parse import urljoin
 except ImportError:
     from urlparse import urljoin
 

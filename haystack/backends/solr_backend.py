@@ -1,19 +1,21 @@
-from __future__ import unicode_literals
+# encoding: utf-8
+
+from __future__ import absolute_import, division, print_function, unicode_literals
 
 import warnings
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
-from django.db.models.loading import get_model
 from django.utils import six
 
 from haystack.backends import BaseEngine, BaseSearchBackend, BaseSearchQuery, EmptyResults, log_query
 from haystack.constants import DJANGO_CT, DJANGO_ID, ID
-from haystack.exceptions import MissingDependency, MoreLikeThisError
+from haystack.exceptions import MissingDependency, MoreLikeThisError, SkipDocument
 from haystack.inputs import Clean, Exact, PythonData, Raw
 from haystack.models import SearchResult
 from haystack.utils import log as logging
 from haystack.utils import get_identifier, get_model_ct
+from haystack.utils.app_loading import haystack_get_model
 
 try:
     from pysolr import Solr, SolrError
@@ -52,6 +54,8 @@ class SolrSearchBackend(BaseSearchBackend):
         for obj in iterable:
             try:
                 docs.append(index.full_prepare(obj))
+            except SkipDocument:
+                self.log.debug(u"Indexing for object `%s` skipped", obj)
             except UnicodeDecodeError:
                 if not self.silently_fail:
                     raise
@@ -103,8 +107,9 @@ class SolrSearchBackend(BaseSearchBackend):
 
                 self.conn.delete(q=" OR ".join(models_to_delete), commit=commit)
 
-            # Run an optimize post-clear. http://wiki.apache.org/solr/FAQ#head-9aafb5d8dff5308e8ea4fcf4b71f19f029c4bb99
-            self.conn.optimize()
+            if commit:
+                # Run an optimize post-clear. http://wiki.apache.org/solr/FAQ#head-9aafb5d8dff5308e8ea4fcf4b71f19f029c4bb99
+                self.conn.optimize()
         except (IOError, SolrError) as e:
             if not self.silently_fail:
                 raise
@@ -373,12 +378,16 @@ class SolrSearchBackend(BaseSearchBackend):
         for raw_result in raw_results.docs:
             app_label, model_name = raw_result[DJANGO_CT].split('.')
             additional_fields = {}
-            model = get_model(app_label, model_name)
+            model = haystack_get_model(app_label, model_name)
 
             if model and model in indexed_models:
+                index = unified_index.get_index(model)
+                index_field_map = index.field_map
                 for key, value in raw_result.items():
-                    index = unified_index.get_index(model)
                     string_key = str(key)
+                    # re-map key if alternate name used
+                    if string_key in index_field_map:
+                        string_key = index_field_map[key]
 
                     if string_key in index.fields and hasattr(index.fields[string_key], 'convert'):
                         additional_fields[string_key] = index.fields[string_key].convert(value)
@@ -509,25 +518,6 @@ class SolrSearchBackend(BaseSearchBackend):
 class SolrSearchQuery(BaseSearchQuery):
     def matching_all_fragment(self):
         return '*:*'
-
-    def add_spatial(self, lat, lon, sfield, distance, filter='bbox'):
-        """Adds spatial query parameters to search query"""
-        kwargs = {
-            'lat': lat,
-            'long': long,
-            'sfield': sfield,
-            'distance': distance,
-        }
-        self.spatial_query.update(kwargs)
-
-    def add_order_by_distance(self, lat, long, sfield):
-        """Orders the search result by distance from point."""
-        kwargs = {
-            'lat': lat,
-            'long': long,
-            'sfield': sfield,
-        }
-        self.order_by_distance.update(kwargs)
 
     def build_query_fragment(self, field, filter_type, value):
         from haystack import connections
